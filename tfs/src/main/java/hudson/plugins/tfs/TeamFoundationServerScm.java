@@ -4,6 +4,7 @@ package hudson.plugins.tfs;
 import com.cloudbees.plugins.credentials.common.StandardUsernamePasswordCredentials;
 import com.microsoft.tfs.core.clients.versioncontrol.specs.version.ChangesetVersionSpec;
 import com.microsoft.tfs.core.clients.versioncontrol.specs.version.DateVersionSpec;
+import com.microsoft.tfs.core.clients.versioncontrol.specs.version.LatestVersionSpec;
 import com.microsoft.tfs.core.clients.versioncontrol.specs.version.VersionSpec;
 import hudson.Extension;
 import hudson.FilePath;
@@ -453,9 +454,15 @@ public class TeamFoundationServerScm extends SCM {
             if (StringUtils.isNotEmpty(singleVersionSpec)) {
                 list = action.checkoutBySingleVersionSpec(server, workspaceFilePath, singleVersionSpec);
             } else {
-                final VersionSpec previousBuildVersionSpec = determineVersionSpecFromBuild(previousBuild, 1, changeSet);
-                final ChangesetVersionSpec currentBuildVersionSpec = new ChangesetVersionSpec(changeSet);
-                list = action.checkout(server, workspaceFilePath, previousBuildVersionSpec, currentBuildVersionSpec);
+                if (changeSet > 0) {
+                    final VersionSpec previousBuildVersionSpec = determineVersionSpecFromBuild(previousBuild, 1, changeSet);
+                    final ChangesetVersionSpec currentBuildVersionSpec = new ChangesetVersionSpec(changeSet);
+                    list = action.checkout(server, workspaceFilePath, previousBuildVersionSpec, currentBuildVersionSpec);
+                } else {
+                    // We couldn't determine the changeset to checkout, so just get latest
+                    logger.warning("Unable to determine changeset number for checkout. Getting latest instead.");
+                    list = action.checkout(server, workspaceFilePath, null, LatestVersionSpec.INSTANCE);
+                }
             }
 
             if (changelogFile != null) {
@@ -488,22 +495,29 @@ public class TeamFoundationServerScm extends SCM {
     }
 
     int recordWorkspaceChangesetVersion(final Run<?, ?> build, final TaskListener listener, final Project project, final String projectPath, final String singleVersionSpec) throws IOException, InterruptedException {
-        final VersionSpec workspaceVersion;
+        try {
+            final VersionSpec workspaceVersion;
 
-        if (!StringUtils.isEmpty(singleVersionSpec)) {
-            workspaceVersion = VersionSpec.parseSingleVersionFromSpec(singleVersionSpec, null);
-        } else {
-            workspaceVersion = new DateVersionSpec(build.getTimestamp());
+            if (!StringUtils.isEmpty(singleVersionSpec)) {
+                workspaceVersion = VersionSpec.parseSingleVersionFromSpec(singleVersionSpec, null);
+            } else {
+                workspaceVersion = new DateVersionSpec(build.getTimestamp());
+            }
+            int buildChangeset;
+            setWorkspaceChangesetVersion(null);
+            buildChangeset = project.getRemoteChangesetVersion(workspaceVersion);
+            setWorkspaceChangesetVersion(Integer.toString(buildChangeset, RADIX_10));
+
+            // by adding this action, we prevent calcRevisionsFromBuild() from being called
+            build.addAction(new TFSRevisionState(buildChangeset, projectPath));
+
+            return buildChangeset;
+        } catch (final Exception ex) {
+            logger.throwing("TeamFoundationServerScm", "recordWorkspaceChangesetVersion", ex);
+            // returning max int so if anyone uses this to get sources, they will get the latest sources on error
+            // TODO consider some retry logic here
+            return -1;
         }
-        int buildChangeset;
-        setWorkspaceChangesetVersion(null);
-        buildChangeset = project.getRemoteChangesetVersion(workspaceVersion);
-        setWorkspaceChangesetVersion(Integer.toString(buildChangeset, RADIX_10));
-
-        // by adding this action, we prevent calcRevisionsFromBuild() from being called
-        build.addAction(new TFSRevisionState(buildChangeset, projectPath));
-
-        return buildChangeset;
     }
 
     void setWorkspaceChangesetVersion(final String workspaceChangesetVersion) {
